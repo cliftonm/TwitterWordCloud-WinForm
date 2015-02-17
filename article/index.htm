@@ -1,0 +1,539 @@
+<html>
+
+<head>
+<meta http-equiv="Content-Language" content="en-us">
+<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>Twitter Word Cloud</title>
+</head>
+
+<body>
+
+<p>Twitter Word Cloud</p>
+<p align="center"><img border="0" src="economy.png" width="634" height="505"></p>
+<h2>Introduction</h2>
+<p>I recently had a conversation with Srini (aka Mike) Vasan (CEO at
+<a href="http://www.quantumventura.com/">Quantum Ventura</a>) on the subject of 
+semantic analysis that led to this fun little project.&nbsp; The idea is to take 
+a Twitter stream (using the wonderful open source
+<a href="https://tweetinvi.codeplex.com/">Tweetinvi C# API</a>) and marrying the 
+output to a word cloud, which I've actually implemented as a
+<a href="http://en.wikipedia.org/wiki/Force-directed_graph_drawing">Force 
+Directed Graph</a> using, as a starting point, the code that
+<a href="http://www.brad-smith.info/blog/archives/129">Bradley Smith blogged 
+about in 2010</a>.&nbsp; I looked at a few word cloud generators but none were 
+suited for real-time updating, however, a force directed graph is a perfect way 
+of creating a living, dynamic view of tweets as they are happening in real time.</p>
+<p>A (silent) video shows this best, so I've posted one here:
+<a href="https://www.youtube.com/watch?v=vEH_1h0jrZY">
+https://www.youtube.com/watch?v=vEH_1h0jrZY</a> </p>
+<p>Wait until the 10 second mark for fun stuff to start happening.</p>
+<p>The salient points of this applet are:</p>
+<ul>
+	<li>Word hit counts are shown in different font sizes (from 8pt to 36pt, 
+	representing counts from 1 to 24)</li>
+	<li>Word hit counts are also reflected in the colorization, from blue 
+	(representing 1 hit) to red (representing 24 or more hits)</li>
+	<li>A maximum of 100 words are shown</li>
+	<li>To accommodate new words once the maximum is reached, existing words 
+	with 1 hit are randomly removed</li>
+	<li>To prevent saturation of &gt;1 hit count words, over time, counts on all 
+	words are slowly decremented</li>
+</ul>
+<h2>Accessing Twitter with the Tweetinvi API</h2>
+<p>This is very simple.&nbsp; You'll need to first obtain a consumer key and 
+consumer secret from Twitter here: <a href="https://apps.twitter.com/">
+https://apps.twitter.com/</a>.&nbsp; Then, get an access token and access token 
+secret from here: <a href="https://api.twitter.com/oauth/request_token">
+https://api.twitter.com/oauth/request_token</a> </p>
+<p>Once you've done that, the credentials are set up in the API with the call:</p>
+<pre>// Setup your credentials
+TwitterCredentials.SetCredentials(&quot;Access_Token&quot;, &quot;Access_Token_Secret&quot;, &quot;Consumer_Key&quot;, &quot;Consumer_Secret&quot;);</pre>
+<p>To get this working in the app, you'll need to place these keys into a file 
+called &quot;twitterauth.txt&quot; in the bin\Debug (or bin\Release) folder.&nbsp; The 
+format should be:</p>
+<pre>[Access Token]
+[Access Token Secret]
+[Consumer Key]
+[Consumer Secret]</pre>
+<p>For example (made up numbers):</p>
+<pre>
+bl6NVMpfD
+bxrhfA8v
+svdaQ86mNTE
+lvGwXzG3MJnN</pre>
+<p>The values you get from Twitter will be much longer.</p>
+<p>I read these four lines and initialize the credentials with:</p>
+<pre>protected void TwitterAuth()
+{
+  string[] keys = File.ReadAllLines(&quot;twitterauth.txt&quot;);
+  TwitterCredentials.SetCredentials(keys[0], keys[1], keys[2], keys[3]);
+}</pre>
+<h2>Starting / Stopping a Filtered Stream</h2>
+<p>The code gracefully handles starting and stopping a stream.&nbsp; By 
+graceful, I mean that, if a stream exists, we shut down the current stream, wait 
+for the event that indicates it has stopped, and then start a new stream.</p>
+<pre>/// &lt;summary&gt;
+/// If a stream hasn't been started, just start it.
+/// If a stream has been started, shut it down, and when it's stopped, start the new stream.
+/// &lt;/summary&gt;
+protected void RestartStream(string keyword)
+{
+  if (stream != null)
+  {
+    Clear();
+    stream.StreamStopped += (sender, args) =&gt; StartStream(keyword);
+    stream.StopStream();
+  }
+  else
+  {
+    StartStream(keyword);
+  }
+}
+
+/// &lt;summary&gt;
+/// Start a stream, filtering ony the keyword and only English language tweets.
+/// &lt;/summary&gt;
+protected void StartStream(string keyword)
+{
+  stream = Stream.CreateFilteredStream();
+  stream.AddTrack(keyword);
+  stream.MatchingTweetReceived += (sender, args) =&gt;
+  {
+    if (args.Tweet.Language == Language.English)
+    {
+      UpdateFdg(args.Tweet.Text);
+    }
+  };
+
+  stream.StartStreamMatchingAllConditionsAsync();
+}
+
+/// &lt;summary&gt;
+/// User wants to stop the stream.
+/// &lt;/summary&gt;
+protected void OnStop(object sender, EventArgs e)
+{
+  if (stream != null)
+  {
+    stream.StreamStopped += (s, args) =&gt; stream = null;
+    stream.StopStream();
+  }
+}
+
+/// &lt;summary&gt;
+/// Clear the word cloud.
+/// &lt;/summary&gt;
+protected void Clear()
+{
+  wordNodeMap.ForEach(kvp =&gt; kvp.Value.Diagram = null);
+  wordNodeMap.Clear();
+}</pre>
+<h2>Parsing the Tweet</h2>
+<p>There's lots of parts of speech that needs to be parsed out of a tweet.&nbsp; 
+At the moment, the dictionary of words to exclude is harcoded:</p>
+<pre>protected List&lt;string&gt; skipWords = new List&lt;string&gt;(new string[] { &quot;a&quot;, &quot;an&quot;, &quot;and&quot;, &quot;the&quot;, &quot;it&quot;, ... etc ...</pre>
+<p>you get the idea.</p>
+<p>We also want to remove punctuation (a somewhat brute force approach):</p>
+<pre>protected List&lt;string&gt; punctuation = new List&lt;string&gt;(new string[] { &quot;.&quot;, &quot;,&quot;, &quot;;&quot;, &quot;?&quot;, &quot;!&quot; });
+
+public static class Extensions
+{
+  // TODO: This is probably painfully slow.
+  public static string StripPunctuation(this string s)
+  {
+    var sb = new StringBuilder();
+
+    foreach (char c in s)
+    {
+      if (!char.IsPunctuation(c))
+      {
+        sb.Append(c);
+      }
+    }
+
+    return sb.ToString();
+  }
+}</pre>
+<p>and filter out specific components of the tweet and the words in our 
+dictionary:</p>
+<pre>/// &lt;summary&gt;
+/// Return true if the word should be eliminated.
+/// The word should be in lowercase!
+/// &lt;/summary&gt;
+protected bool EliminateWord(string word)
+{
+  bool ret = false;
+  int n;
+
+  if (int.TryParse(word, out n))
+  {
+    ret = true;
+  }
+  else if (word.StartsWith(&quot;#&quot;))
+  {
+    ret = true;
+  }
+  else if (word.StartsWith(&quot;http&quot;))
+  {
+    ret = true;
+  }
+  else
+  {
+    ret = skipWords.Contains(word);
+  }
+
+  return ret;
+}</pre>
+<h2>Avoiding Saturation and Accommodating new Tweets</h2>
+<p>As mentioned earlier, once we reach the limit of 100 words, we remove stale 
+words to make room for new words:</p>
+<pre>/// &lt;summary&gt;
+/// Remove the stalest 1 hit count word from the list -- this is the word that has not been updated the longest.
+/// We do this only when the word count exceends MaxWords
+/// &lt;/summary&gt;
+protected void RemoveAStaleWord()
+{
+  if (wordNodeMap.Count &gt; MaxWords)
+  {
+    // TODO: Might be more efficient to maintain a sorted list to begin with!
+    DateTime now = DateTime.Now;
+    KeyValuePair&lt;string, TextNode&gt; tnode = wordNodeMap.Where(w =&gt; w.Value.Count==1).
+          OrderByDescending(w =&gt; (now - w.Value.UpdatedOn).TotalMilliseconds).First();
+    // Do not call RemoveNode, as this results in a stack overflow because the property setter has this side effect.
+    tnode.Value.Diagram = null; // THIS REMOVES THE NODE FROM THE DIAGRAM. 
+    wordNodeMap.Remove(tnode.Key);
+    wordTweetMap.Remove(tnode.Key);
+  }
+}</pre>
+<p>The above algorithm applies only to words with one hit count.&nbsp; If we 
+don't do this, high volume streams, like &quot;Obama&quot; result in words never gaining 
+any traction because of the huge volume of tweets coming in.&nbsp; By 
+eliminating only the oldest &quot;rabble&quot;, we get a nice word cloud of the concerns 
+around President Obama:</p>
+<p align="center"><img border="0" src="obama.png" width="634" height="505"></p>
+<p>Saturation is avoided by reducing all word counts over time, based on the 
+number of tweets (iterations) modulus some saturation value, currently set to 20 
+- in other words, every 20 tweets, all word counts are decremented:</p>
+<pre>/// &lt;summary&gt;
+/// Prevent saturation by decrementing all word counts every 20 tweets.
+/// &lt;/summary&gt;
+protected void ReduceCounts()
+{
+  // Every 20 iterations (the default for SaturationCount), decrement the word count on all non-1 count words.
+  // This allows us to eventually replace old words no longer comning up in new tweets.
+  if (iteration % SaturationCount == 0)
+  {
+    iteration = 0;
+    wordNodeMap.Where(wc =&gt; wc.Value.Count &gt; 1).Select(wc =&gt; wc.Key).ForEach(w=&gt;wordNodeMap[w].DecrementCount());
+  }
+}</pre>
+<h2>Queueing the Tweet</h2>
+<p>The tweets are received asynchronously, so we put a lock around adding them 
+to the queue:</p>
+<pre>protected void UpdateFdg(string text)
+{
+  lock (this)
+  {
+    tweetQueue.Enqueue(text);
+  }
+}</pre>
+<h2>De-Queueing the Tweet</h2>
+<p>The entire process of updating the FDG is done in the application's main 
+thread, specifically in the OnPaint method, which is called 20 times a second by 
+invalidating the owner-draw panel:</p>
+<pre>timer = new System.Windows.Forms.Timer();
+timer.Interval = 1000 / 20; // 20 times a second, in milliseconds.
+timer.Tick += (sender, args) =&gt; pnlCloud.Invalidate(true);</pre>
+<p>In the Paint event handler, we dequeue the tweet, update the nodes in the 
+graph, execute a single iteration cycle of the FDG and draw the results:</p>
+<pre>pnlCloud.Paint += (sender, args) =&gt;
+{
+  Graphics gr = args.Graphics;
+  gr.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.HighQuality;
+
+  ++paintIteration;
+
+  if (!overrun)
+  {
+    overrun = true;
+    int maxTweets = 20;
+
+    // We assume here that we can parse the data faster than the incoming stream hands it to us.
+    // But we put in a safety check to handle only 20 tweets.
+    while (tweetQueue.Count &gt; 0 &amp;&amp; (--maxTweets &gt; 0))
+    {
+      string tweet;
+
+      lock (this)
+      {
+        tweet = tweetQueue.Dequeue();
+      }
+
+      SynchronousUpdate(tweet);
+    }
+
+    // gr.Clear(Color.White);
+    diagram.Iterate(Diagram.DEFAULT_DAMPING, Diagram.DEFAULT_SPRING_LENGTH, Diagram.DEFAULT_MAX_ITERATIONS);
+    diagram.Draw(gr, Rectangle.FromLTRB(12, 24, pnlCloud.Width - 12, pnlCloud.Height - 36));
+    overrun = false;
+  }
+  else
+  {
+    gr.DrawString(&quot;overrun&quot;, font, brushBlack, new Point(3, 3));
+  }
+};</pre>
+<p>I've never seen the application emit an overrun message, so I assume that 
+everything processes fast enough that that's not an issue.&nbsp; Also, the 
+processing of the incoming tweets, filtering the words, etc., could all be done 
+in separate threads, but for simplicity, and because a lot of the existing code 
+that I used for the FDG would need refactoring to be more thread-friendly, I 
+decided to keep it simple and perform all the processing synchronously.</p>
+<h2>Updating the Counters and Tweet Buffers</h2>
+<p>The workhorse function is really SynchronousUpdate.&nbsp; Here, we remove any 
+punctuation, eliminate words we don't care about, replace stale words with any 
+new words in the tweet, and update the word hit counters.&nbsp; We also record 
+up to &quot;MaxTweet&quot; tweets for each word, which (as I'll show next) on mouse-over, 
+you can then see the tweet text.&nbsp; Here's the method:</p>
+<pre>protected void SynchronousUpdate(string tweet)
+{
+  string[] words = tweet.Split(' ');
+
+  ++iteration;
+  ReduceCounts();
+
+  foreach (string w in words)
+  {
+    string word = w.StripPunctuation();
+    string lcword = word.ToLower();
+    TextNode node;
+
+    if (!EliminateWord(lcword))
+    {
+      if (!wordNodeMap.TryGetValue(lcword, out node))
+      {
+        ++totalWordCount;
+        PointF p = rootNode.Location;
+        RemoveAStaleWord();
+        TextNode n = new TextNode(word, p);
+        rootNode.AddChild(n);
+        wordNodeMap[lcword] = n;
+        wordTweetMap[lcword] = new Queue&lt;string&gt;(new string[] { tweet });
+      }
+      else
+      {
+        wordNodeMap[lcword].IncrementCount();
+        Queue&lt;string&gt; tweets = wordTweetMap[lcword];
+
+        // Throw away the oldest tweet if we have more than 20 associated with this word.
+        if (tweets.Count &gt; MaxTweets)
+        {
+          tweets.Dequeue();
+        }
+
+        tweets.Enqueue(tweet);
+      }
+    }
+  }
+}  </pre>
+<h2>Mouse-Overs</h2>
+<p>Mouse-overs are handled by two events:</p>
+<pre>pnlCloud.MouseMove += OnMouseMove;
+pnlCloud.MouseLeave += (sender, args) =&gt;
+{
+  if (tweetForm != null)
+  {
+    tweetForm.Close();
+    tweetForm=null;
+    mouseWord=String.Empty;
+  }
+};</pre>
+<p>When the mouse leaves the owner-draw panel, we close the form displaying the 
+tweets and reset everything to a &quot;not showing tweets&quot; state.&nbsp; </p>
+<p>When the user moves the mouse over the owner-draw panel, we check for whether 
+the mouse coordinates are inside the rectangle displaying a word.&nbsp; There's 
+some logic to update the existing tweet form or create a new one if one isn't 
+displayed:</p>
+<pre>/// &lt;summary&gt;
+/// Display tweets for the word the user is hovering over.
+/// If a tweet popup is currently displayed, move popup window until the mouse is over a different word.
+/// &lt;/summary&gt;
+protected void OnMouseMove(object sender, MouseEventArgs args)
+{
+  var hits = wordNodeMap.Where(w =&gt; w.Value.Region.Contains(args.Location));
+  Point windowPos = PointToScreen(args.Location);
+  windowPos.Offset(50, 70);
+
+  if (hits.Count() &gt; 0)
+  {
+    string word = hits.First().Key;
+    TextNode node = hits.First().Value;
+
+    if (mouseWord == word)
+    {
+      tweetForm.Location = windowPos;
+    }
+    else
+    {
+      if (tweetForm == null)
+      {
+        tweetForm = new TweetForm();
+        tweetForm.Location = windowPos;
+        tweetForm.Show();
+        tweetForm.TopMost = true;
+      }
+
+      // We have a new word.
+      tweetForm.tbTweets.Clear();
+      ShowTweets(word);
+      mouseWord = word;
+    }
+  }
+  else
+  {
+    // Just move the window.
+    if (tweetForm != null)
+    {
+      tweetForm.Location = windowPos;
+      tweetForm.TopMost = true;
+    }
+  }
+}</pre>
+<p>The result is popup window that moves with the mouse as the user moves around 
+the owner-draw panel:</p>
+<p><img border="0" src="bacon.png" width="631" height="503"></p>
+<h2>The Force Directed Graph</h2>
+<p>If you look at Bradley Smith's original FDG code, you'll notice that I've 
+changed a few things.&nbsp; For one, I'm not drawing the force lines, only the 
+nodes:</p>
+<pre>foreach (Node node in nodes)
+{
+  PointF destination = ScalePoint(node.Location, scale);
+
+  Size nodeSize = node.Size;
+  RectangleF nodeBounds = new RectangleF(center.X + destination.X - (nodeSize.Width / 2), center.Y + destination.Y - (nodeSize.Height / 2), nodeSize.Width, nodeSize.Height);
+  node.DrawNode(graphics, nodeBounds);
+}</pre>
+<p>The original code was also simply drawing spots, so I extended the <code>SpotNote</code>
+class to be able draw text as well:</p>
+<pre>public class TextNode : SpotNode
+{
+  protected int count;
+
+  public int Count 
+  {
+    get { return count; }
+  }
+
+  public Rectangle Region { get; set; }
+
+  public DateTime CreatedOn { get; set; }
+  public DateTime UpdatedOn { get; set; }
+
+  public static Dictionary&lt;int, Font&gt; fontSizeMap = new Dictionary&lt;int, Font&gt;();
+
+  protected string text;
+
+  public TextNode(string text, PointF location)
+    : base()
+  {
+    this.text = text;
+    Location = location;
+    count = 1;
+    CreatedOn = DateTime.Now;
+    UpdatedOn = CreatedOn;
+  }
+
+  /// &lt;summary&gt;
+  /// Update the UpdatedOn timestamp when incrementing the count.
+  /// &lt;/summary&gt;
+  public void IncrementCount()
+  {
+    ++count;
+    UpdatedOn = DateTime.Now;
+  }
+
+  /// &lt;summary&gt;
+  /// Do NOT update the UpdatedOn timestamp when decrementing the count.
+  /// Also, do not allow the count to go 0 or negative.
+  /// &lt;/summary&gt;
+  public void DecrementCount()
+  {
+    if (count &gt; 1)
+    {
+      --count;
+    }
+  }
+
+  public override void DrawNode(Graphics gr, RectangleF bounds)
+  {
+    // base.DrawNode(gr, bounds);
+
+    Font font;
+    int fontSize = Math.Min(8 + Count, 36);
+
+    if (!fontSizeMap.TryGetValue(fontSize, out font))
+    {
+      font = new Font(FontFamily.GenericSansSerif, fontSize);
+      fontSizeMap[fontSize] = font;
+    }
+
+    // Create a color based on count, from 1 to a max of 24
+    // Count (or count) is the true count. Here we limit the count to be between 1 and 24.
+    int count2 = Math.Min(count, 24);
+
+    if (count2 &gt;= twitterWordCloud.AppForm.CountThreshold)
+    {
+      int blue = 255 * (24 - count2) / 24;
+      int red = 255 - blue;
+      Brush brush = new SolidBrush(Color.FromArgb(red, 0, blue));
+
+      SizeF strSize = gr.MeasureString(text, font);
+      PointF textCenter = PointF.Subtract(bounds.Location, new Size((int)strSize.Width / 2 - 5, (int)strSize.Height / 2 - 5));
+      Region = Rectangle.FromLTRB((int)textCenter.X, (int)textCenter.Y, (int)(textCenter.X + strSize.Width), (int)(textCenter.Y + strSize.Height));
+
+      gr.DrawString(text, font, brush, textCenter);
+
+      brush.Dispose();
+    }
+  }
+}</pre>
+<p>This class also colorizes the text and each node, being a unique word, keeps 
+track of the hit count and created/updated date.&nbsp; </p>
+<p>I also removed the asynchronous behavior of the FDG that Bradley had 
+originally implemented.&nbsp; Also removed was the detection for when to stop 
+iterating -- the graph iterates forever, which is evident in the constant wiggle 
+of the central spot.&nbsp; Various tweaks were also made to better support 
+adding / removing nodes.</p>
+<h2>Conclusion</h2>
+<p>This was a fun little project to throw together using some great existing 
+work and just writing a bit of logic around the Twitter and FDG pieces to glue 
+them together.&nbsp; I found some disappointing things:</p>
+<ol>
+	<li>The vast majority of the &quot;newsy&quot; tweets are re-tweeted, often 
+	disproportionately skewing the hit counts.</li>
+	<li>&quot;Original&quot; tweets are for the most part rather boring, being simply 
+	paraphrases of other tweets.</li>
+	<li>People really only tweet about mainstream things.&nbsp; You won't find 
+	people tweeting about global warming or alternative currencies.</li>
+</ol>
+<p>I also found some interesting things:</p>
+<ol>
+	<li>You can discover interesting linkages between subjects.&nbsp; For 
+	example, when watching the feed on &quot;Obama&quot;, I saw &quot;BigBird&quot; and discovered 
+	that Michelle Obama was meeting with Sesame Street's BigBird.&nbsp; A good 
+	thing for the First Lady to be doing!</li>
+	<li>I &quot;read&quot; about the oil tanker train wreck in West Virginia first through 
+	this program as a result of filtering on &quot;oil&quot; and saw keywords like &quot;train&quot; 
+	and &quot;derailment&quot; having significant hit counts.</li>
+<li>It definitely looks possible to perform sentiment analysis on tweets -- there 
+are many single hit count words that convey sentiment: &quot;angry&quot;, &quot;happy&quot;, 
+&quot;scared&quot;, &quot;disappointed&quot;, and so forth.</li>	
+</ol>
+<p>There's also some other fun things that could be done, such as plotting the 
+tweets on a map, filtering tweets by geolocation, extending the filtering 
+mechanism for &quot;and&quot; vs. &quot;or&quot; filter tracks, and so forth.&nbsp; This applet 
+really just touches the surface of what can be done.</p>
+
+</body>
+
+</html>
